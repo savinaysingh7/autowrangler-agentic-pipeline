@@ -43,7 +43,7 @@ class ReproTraceTests(unittest.TestCase):
                     {"configurable": {"thread_id": "test-reprotrace"}},
                 )
             passport = destination.read_text(encoding="utf-8")
-        self.assertIn("ReproTrace reproducibility passport", passport)
+        self.assertIn("ReproTrace Passport", passport)
         self.assertGreater(len(result["audit_history"]), 1)
         self.assertIn("PLANNED", result["passport_markdown"])
         self.assertLess(result["audit_history"][-1]["risk_score"], result["audit_history"][0]["risk_score"])

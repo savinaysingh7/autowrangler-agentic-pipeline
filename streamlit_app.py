@@ -1,91 +1,102 @@
-from __future__ import annotations
-
-from pathlib import Path
-
+import os
 import streamlit as st
+import json
+from dataclasses import asdict
+from main import build_workflow, build_profile, get_sample_scenarios
 
-from main import build_profile, build_workflow, get_sample_scenarios
+# UI Page configuration
+st.set_page_config(page_title="ReproTrace Auditor", page_icon="🔬", layout="wide")
 
+st.title("🔬 ReproTrace: Reproducibility Risk Orchestrator")
+st.markdown("Translates abstract study intentions into a structured reproducibility risk passport using an evidence-grounded agentic workflow.")
 
-ROOT = Path(__file__).resolve().parent
-st.set_page_config(page_title="ReproTrace", page_icon=":material/fact_check:", layout="wide")
-st.session_state.setdefault("audit_result", None)
-
-st.title("ReproTrace")
-st.caption("An evidence-grounded reproducibility audit orchestrator — not a protocol chatbot.")
-
+# Sidebar Controls
 with st.sidebar:
-    st.header("How it works")
-    st.markdown(":blue-badge[MQR evidence] :violet-badge[LangGraph] :green-badge[Tool score]")
-    st.caption("The audit separates verified safeguards from planned mitigations. Local evidence is illustrative.")
-    with st.expander("Decision flow", icon=":material/account_tree:"):
-        st.markdown("Retrieve methodology guidance → calculate risk ledger → plan controls → re-score → issue passport")
+    st.header("1. Input Configuration")
+    input_method = st.radio("Choose Input Method", ["Demo Scenarios", "Custom Configuration"])
+    
+    if input_method == "Demo Scenarios":
+        scenarios = get_sample_scenarios()
+        scenario_choice = st.selectbox("Select Profile", list(scenarios.keys()))
+        selected_data = scenarios[scenario_choice]
+    else:
+        # For capstone scale: custom input
+        st.write("Manual Configurator")
+        selected_data = {
+            "title": st.text_input("Study Title", "Custom Local Study"),
+            "study_design": st.selectbox("Design", ["randomized trial", "observational study", "lab experiment"]),
+            "sample_size": st.number_input("Sample Size", min_value=1, value=20),
+            "outcome_count": st.number_input("Outcome Count", min_value=1, value=5),
+            "primary_outcome": st.text_input("Primary Outcome", ""),
+            "has_preregistration": st.checkbox("Preregistration Completed?"),
+            "has_power_analysis": st.checkbox("Power Analysis Conducted?"),
+            "has_data_management_plan": st.checkbox("Data Management Plan Active?"),
+            "has_code_repository": st.checkbox("Code Repo Exists?"),
+            "has_blinding": st.checkbox("Blinding Validated?"),
+            "has_ethics_approval": st.checkbox("Ethics Approv. Attached?", value=True),
+            "data_sensitivity": st.selectbox("Data Sensitivity", ["standard", "health"])
+        }
+    
+    run_audit = st.button("🚀 Run Reproducibility Audit", type="primary")
 
-scenarios = get_sample_scenarios()
-scenario_name = st.selectbox("Load a scenario", list(scenarios), key="scenario")
-defaults = scenarios[scenario_name]
+# Run Pipeline Session
+if "audit_result" not in st.session_state:
+    st.session_state.audit_result = None
 
-with st.container(border=True):
-    st.subheader("Study protocol", divider="gray")
-    with st.form("protocol"):
-        left, right = st.columns(2)
-        with left:
-            title = st.text_input("Study title", value=defaults["title"])
-            study_design = st.selectbox("Study design", ["randomized trial", "observational study", "systematic review"], index=["randomized trial", "observational study", "systematic review"].index(defaults["study_design"]))
-            sample_size = st.number_input("Planned sample size", min_value=0, value=defaults["sample_size"], step=1)
-            outcome_count = st.number_input("Number of outcomes", min_value=0, value=defaults["outcome_count"], step=1)
-            primary_outcome = st.text_input("Primary outcome", value=defaults["primary_outcome"])
-        with right:
-            data_sensitivity = st.selectbox("Data sensitivity", ["standard", "health", "sensitive"], index=["standard", "health", "sensitive"].index(defaults["data_sensitivity"]))
-            has_preregistration = st.checkbox("Preregistration is complete", value=defaults["has_preregistration"])
-            has_power_analysis = st.checkbox("Power/precision analysis is documented", value=defaults["has_power_analysis"])
-            has_data_management_plan = st.checkbox("Data management plan is documented", value=defaults["has_data_management_plan"])
-            has_code_repository = st.checkbox("Versioned code repository is ready", value=defaults["has_code_repository"])
-            has_blinding = st.checkbox("Blinding plan is documented", value=defaults["has_blinding"])
-            has_ethics_approval = st.checkbox("Required ethics approval is in place", value=defaults["has_ethics_approval"])
-        submitted = st.form_submit_button("Run reproducibility audit", type="primary", icon=":material/fact_check:")
-
-if submitted:
-    values = {
-        "title": title, "study_design": study_design, "sample_size": sample_size, "outcome_count": outcome_count,
-        "primary_outcome": primary_outcome, "data_sensitivity": data_sensitivity, "has_preregistration": has_preregistration,
-        "has_power_analysis": has_power_analysis, "has_data_management_plan": has_data_management_plan,
-        "has_code_repository": has_code_repository, "has_blinding": has_blinding, "has_ethics_approval": has_ethics_approval,
-    }
-    with st.status("Building an auditable protocol passport...", expanded=True) as status:
-        st.write("Retrieving evidence and calculating the deterministic risk ledger.")
-        result = build_workflow().invoke(
-            {"profile": build_profile(values), "report_path": str(ROOT / "reports" / "reproducibility_passport.md")},
-            {"configurable": {"thread_id": "reprotrace-streamlit"}},
+if run_audit:
+    with st.spinner("Compiling protocol baseline & mapping methodologies..."):
+        workflow = build_workflow()
+        profile = build_profile(selected_data)
+        
+        st.session_state.audit_result = workflow.invoke(
+            {"profile": profile},
+            {"configurable": {"thread_id": "capstone_ui"}}
         )
-        status.update(label="Audit complete", state="complete", expanded=False)
-    st.session_state.audit_result = result
-    st.toast("Reproducibility passport generated", icon=":material/check_circle:")
 
-result = st.session_state.audit_result
-if result:
-    audit = result["audit"]
-    st.header("Audit decision")
-    (st.success if audit["readiness"] == "ready" else st.warning)(
-        f"Readiness: {audit['readiness']}. Risk score: {audit['risk_score']}/100.",
-        icon=":material/check_circle:" if audit["readiness"] == "ready" else ":material/warning:",
-    )
-    with st.container(horizontal=True):
-        st.metric("Risk score", f"{audit['risk_score']}/100", border=True)
-        st.metric("Verified controls", audit["verified_controls"], border=True)
-        st.metric("Planned controls", audit["planned_controls"], border=True)
-        st.metric("Evidence records", len(result["evidence"]), border=True)
+# Main Dashboard View (Render only when processed)
+if st.session_state.audit_result:
+    res = st.session_state.audit_result
+    
+    tab1, tab2, tab3, tab4 = st.tabs(["Dashboard", "Control Ledger", "Evidence Trajectory", "Generated Passport (Export)"])
+    
+    with tab1:
+        st.header(f"Study Assessment: {res['profile'].title}")
+        col1, col2, col3, col4 = st.columns(4)
+        latest_audit = res['audit']
+        col1.metric("Risk Score", latest_audit['risk_score'], delta="- Improvement Loop Applied", delta_color="normal")
+        col2.metric("Readiness Level", str(latest_audit['readiness']).upper())
+        col3.metric("Verified Controls", latest_audit['verified_controls'])
+        col4.metric("AI Planned Controls", latest_audit['planned_controls'])
+        
+        st.write("### AI Mitigations Applied (Not Yet Verified)")
+        for planned in res['committed_controls']:
+            st.info(f"🔄 Plan Inserted: Requirement for **{planned}** automatically formulated.")
+            
+    with tab2:
+        st.header("Comprehensive Ledger")
+        for check in latest_audit['checks']:
+            if check['verified']:
+                st.success(f"✅ **{check['control'].upper()}** - {check['recommendation']} (Points: {check['risk_points']})")
+            elif check['planned']:
+                st.warning(f"🟡 **{check['control'].upper()} (PLANNED BY ReproTrace)** - {check['recommendation']} (Points mitigated temporarily)")
+            else:
+                st.error(f"❌ **{check['control'].upper()} (GAP)** - {check['recommendation']} (+{check['risk_points']} Risk)")
 
-    checks_tab, trajectory_tab, evidence_tab, passport_tab = st.tabs(["Control ledger", "Risk trajectory", "Evidence", "Passport"])
-    with checks_tab:
-        st.dataframe(audit["checks"], hide_index=True, width="stretch")
-        st.caption("Planned controls reduce the projected score but are never displayed as verified safeguards.")
-    with trajectory_tab:
-        st.line_chart(result["audit_history"], x="iteration", y="risk_score")
-        st.dataframe(result["audit_history"], hide_index=True, width="stretch")
-    with evidence_tab:
-        st.dataframe(result["evidence"], hide_index=True, width="stretch")
-    with passport_tab:
-        passport = result["passport_markdown"]
-        st.markdown(passport)
-        st.download_button("Download reproducibility passport", passport, "reproducibility_passport.md", "text/markdown", icon=":material/download:")
+    with tab3:
+        st.header("LangGraph Risk Reduction Iterations")
+        for i, hist in enumerate(res['audit_history']):
+            st.write(f"**Loop {hist['iteration']}**: Score -> {hist['risk_score']} ({hist['readiness']})")
+        
+        st.divider()
+        st.header("Grounding Citations")
+        for doc in res['evidence']:
+            st.markdown(f"> **Source**: {doc.get('source')} - {doc.get('section')} ({doc.get('year')})  \n> *\"{doc['content']}\"*")
+
+    with tab4:
+        st.markdown(res['passport_markdown'])
+        st.download_button(
+            label="Download Complete Passport (.md)", 
+            data=res['passport_markdown'], 
+            file_name=f"{res['profile'].title.replace(' ','_')}_Passport.md", 
+            mime="text/markdown"
+        )
