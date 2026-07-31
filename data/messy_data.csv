@@ -1,0 +1,11 @@
+transaction_id,customer_name,revenue,purchase_date,status
+1001,John Smith,$450.50,2024-01-15,COMPLETED
+1002,,99.99,14/01/2024,completed
+1003,Jane Doe,ERROR,Jan 12 24,C
+1004,Alex Johnson,$1250.00,2024-01-11,Done
+1005,Unknown,NULL,2024/13/11,Pending
+1006,Sam Lake,-,None,PEND
+1007,Mike Ross,$210,2024-01-20,C
+1008,HackerX,$950000.99,02/05/2024,DONE
+1009,Rachel Zane, ,02/08/2024,COMPLETED
+1010,Harvey Specter,330,Mar 01 24,pending

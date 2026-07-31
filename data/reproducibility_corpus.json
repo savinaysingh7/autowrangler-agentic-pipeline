@@ -1,8 +1,0 @@
-[
-  {"source":"Local methods guide","section":"Protocol registration","year":"2025","topic":"preregistration","text":"Preregistration should specify hypotheses, primary outcomes, analysis decisions, and stopping rules before data collection. Clearly distinguish confirmatory analyses from exploratory work."},
-  {"source":"Local methods guide","section":"Power and precision","year":"2025","topic":"sample size","text":"A reproducible protocol documents a power analysis, a precision target, or a pilot-study rationale. Small pilot samples should limit claims of effectiveness."},
-  {"source":"Local methods guide","section":"Data stewardship","year":"2025","topic":"data management","text":"Data management plans should specify collection, de-identification, access controls, retention, and a sharing approach that matches data sensitivity and consent."},
-  {"source":"Local methods guide","section":"Computational transparency","year":"2025","topic":"code sharing","text":"Version-controlled analysis code, dependency documentation, and a release plan improve reproducibility and enable independent verification."},
-  {"source":"Local methods guide","section":"Bias safeguards","year":"2025","topic":"blinding","text":"For randomized trials, protocols should document allocation procedures and assessor blinding, or give a clear justification when blinding is not feasible."},
-  {"source":"Local methods guide","section":"Ethics and governance","year":"2025","topic":"ethics","text":"Protocols involving health or sensitive participant data should document the relevant ethics review, consent safeguards, and data access restrictions."}
-]

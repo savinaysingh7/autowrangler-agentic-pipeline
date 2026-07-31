@@ -1,336 +1,469 @@
-from __future__ import annotations
-
-import argparse
-import json
 import os
-import re
-from dataclasses import asdict, dataclass
+import logging
+import tempfile
+import pandas as pd
+import numpy as np
+from typing import TypedDict, List, Literal, Any
 from pathlib import Path
-from typing import Any, TypedDict
-
-from dotenv import load_dotenv
-from langchain.tools import tool
-from langchain_core.documents import Document
-from langchain_core.language_models.fake import FakeListLLM
-from langchain_core.retrievers import BaseRetriever
-from langchain_openai import ChatOpenAI
-from langchain_classic.retrievers import MultiQueryRetriever
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.graph import END, START, StateGraph
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-CORPUS_PATH = PROJECT_ROOT / "data" / "reproducibility_corpus.json"
-DEFAULT_OUTPUT_PATH = Path("reports") / "reproducibility_passport.md"
-AUDIT_STORE = InMemoryStore()
 load_dotenv(PROJECT_ROOT / ".env")
+LLM_PROVIDER = os.getenv("AUTOWRANGLER_LLM_PROVIDER", "groq").lower()
 
-# Determines whether to run purely local dummy AI or Capstone Grade LLM logic
-HAS_REAL_API = bool(os.getenv("OPENAI_API_KEY"))
+# --- CONFIGURATION CONSTANTS ---
+ZSCORE_THRESHOLD = 3.0
+MAX_RETRIES = 1
+SAMPLE_SIZE = 6
 
-@dataclass
-class StudyProfile:
-    title: str
-    study_design: str
-    sample_size: int
-    outcome_count: int
-    primary_outcome: str
-    has_preregistration: bool = False
-    has_power_analysis: bool = False
-    has_data_management_plan: bool = False
-    has_code_repository: bool = False
-    has_blinding: bool = False
-    has_ethics_approval: bool = False
-    data_sensitivity: str = "standard"
+OPERATION_PRIORITY = {
+    "drop_duplicates": 0,
+    "drop_column": 1,
+    "cast_numeric": 2,
+    "parse_dates": 2,
+    "standardize_categorical_text": 2,
+    "impute_mean_values": 3,
+    "impute_median": 3,
+    "impute_mode": 3,
+    "normalize_min_max": 4,
+    "flag_zscore_anomalies": 5,
+    "leave_alone": 9,
+}
 
-class AuditState(TypedDict, total=False):
-    profile: StudyProfile
-    queries: list[str]
-    evidence: list[dict[str, str]]
-    committed_controls: list[str]
-    audit_history: list[dict[str, Any]]
-    audit: dict[str, Any]
-    iteration: int
-    passport_markdown: str
-    report_path: str
+# --- LOGGING ---
+logger = logging.getLogger("autowrangler")
 
-class _QueryLLM(FakeListLLM):
-    pass
+# --- 1. PYDANTIC CONSTRAINTS (Expanded for Machine Learning Data Prep) ---
+class ColumnOperation(BaseModel):
+    column_name: str
+    operation: Literal[
+        "cast_numeric",
+        "standardize_categorical_text",
+        "parse_dates",
+        "impute_mean_values",
+        "impute_median",
+        "impute_mode",
+        "flag_zscore_anomalies",
+        "normalize_min_max",
+        "drop_duplicates",
+        "drop_column",
+        "leave_alone",
+    ] = Field(description="The deterministic pandas or statistical ML action for this column.")
+    reason: str = Field(description="Data science justification for this choice.")
 
-class LocalEvidenceRetriever(BaseRetriever):
-    docs: list[Document]
-    k: int = 6
+class CleaningPlan(BaseModel):
+    steps: List[ColumnOperation] = Field(description="Execution chain for the Data Science Agent")
 
-    @staticmethod
-    def _tokens(text: str) -> set[str]:
-        return set(re.findall(r"[a-z0-9]+", text.lower()))
+class AnalystFindings(BaseModel):
+    narrative: str = Field(description="2-paragraph executive data science summary.")
+    key_metrics: dict[str, Any] = Field(description="Dictionary of key performance metrics from the pipeline run.")
+    anomalies_found: List[dict[str, Any]] = Field(description="List of detected anomalies with column name, count, and description.")
+    recommendations: List[str] = Field(description="Actionable next-step recommendations for the data owner.")
 
-    def _get_relevant_documents(self, query: str) -> list[Document]:
-        query_tokens = self._tokens(query)
-        return sorted(
-            self.docs,
-            key=lambda document: (
-                len(query_tokens & self._tokens(document.page_content)),
-                len(document.page_content),
-            ),
-            reverse=True,
-        )[: self.k]
+# --- 2. ADVANCED CYCLICAL STATE ---
+class GraphState(TypedDict):
+    input_csv_path: str
+    working_csv_path: str
+    schema_info: str
+    data_sample: str
+    domain_context: str
+    plan: dict[str, Any]
+    logs: List[str]
+    metrics: dict[str, Any]
+    executive_narrative: str
+    analyst_findings: dict[str, Any]
+    retry_count: int
+    feedback_loop: str
+    status: str
 
-def _build_corpus() -> list[Document]:
-    with CORPUS_PATH.open(encoding="utf-8") as handle:
-        records = json.load(handle)
-    return [
-        Document(
-            page_content=record["text"],
-            metadata={key: str(value) for key, value in record.items() if key != "text"},
-        )
-        for record in records
-    ]
-
-def _get_orchestration_llm():
-    if HAS_REAL_API:
-        return ChatOpenAI(model="gpt-4o-mini", temperature=0.0)
+# --- 3. MODEL ROUTER ---
+def get_llm():
+    if LLM_PROVIDER == "groq" and os.getenv("GROQ_API_KEY"):
+        from langchain_groq import ChatGroq
+        return ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0)
+    elif LLM_PROVIDER == "mistral" and os.getenv("MISTRAL_API_KEY"):
+        from langchain_mistralai import ChatMistralAI
+        return ChatMistralAI(model="mistral-large-latest", temperature=0.0)
+    elif LLM_PROVIDER == "ollama":
+        from langchain_ollama import ChatOllama
+        model_name = os.getenv("OLLAMA_MODEL", "llama3.1")
+        return ChatOllama(model=model_name, temperature=0.0)
     else:
-        return _QueryLLM(responses=[
-            "1. preregistration outcome reporting bias\n2. statistical power precision requirements\n3. data retention access and blinding methodologies"
-        ])
+        raise Exception("Requires a valid API Key or Ollama for Data Science Agent Mode. "
+                        "Set AUTOWRANGLER_LLM_PROVIDER and the corresponding key in .env")
 
-def _build_retriever() -> MultiQueryRetriever:
-    base_retriever = LocalEvidenceRetriever(docs=_build_corpus())
-    query_llm = _get_orchestration_llm()
-    return MultiQueryRetriever.from_llm(retriever=base_retriever, llm=query_llm)
+def _log(state: GraphState, message: str) -> None:
+    """Dual logging: append to state logs for UI and emit via Python logger."""
+    state.setdefault("logs", []).append(message)
+    logger.info(message)
 
-def get_sample_scenarios() -> dict[str, dict[str, Any]]:
-    # Left intact as default deterministic fixtures for graders who want immediate offline running
-    return {
-        "under-specified study": {
-            "title": "Mobile sleep intervention pilot",
-            "study_design": "randomized trial",
-            "sample_size": 24,
-            "outcome_count": 6,
-            "primary_outcome": "",
-            "has_preregistration": False,
-            "has_power_analysis": False,
-            "has_data_management_plan": False,
-            "has_code_repository": False,
-            "has_blinding": False,
-            "has_ethics_approval": True,
-            "data_sensitivity": "health",
-        },
-        "prepared observational study": {
-            "title": "Urban mobility and wellbeing cohort",
-            "study_design": "observational study",
-            "sample_size": 320,
-            "outcome_count": 2,
-            "primary_outcome": "Weekly wellbeing score",
-            "has_preregistration": True,
-            "has_power_analysis": True,
-            "has_data_management_plan": True,
-            "has_code_repository": True,
-            "has_blinding": False,
-            "has_ethics_approval": True,
-            "data_sensitivity": "standard",
-        },
+def _sort_plan_steps(steps: list[dict]) -> list[dict]:
+    """Sort plan steps by operation priority so dependencies execute in correct order."""
+    return sorted(steps, key=lambda s: (OPERATION_PRIORITY.get(s["operation"], 99), s["column_name"]))
+
+# --- 4. MULTI-AGENT NODES ---
+def analyze_and_profile(state: GraphState) -> GraphState:
+    """Reads dataset, grabs memory footprints, profiles types."""
+    _log(state, "PROFILER: Scanning data file distributions...")
+
+    input_path = state["input_csv_path"]
+    if not os.path.exists(input_path):
+        raise FileNotFoundError(f"Dataset not found: {input_path}")
+
+    try:
+        df = pd.read_csv(input_path)
+    except pd.errors.EmptyDataError:
+        raise ValueError(f"Dataset is empty: {input_path}")
+    except pd.errors.ParserError as e:
+        raise ValueError(f"Failed to parse CSV: {e}")
+
+    if len(df) == 0:
+        raise ValueError(f"Dataset has no rows: {input_path}")
+
+    if len(df) == 1:
+        _log(state, "PROFILER WARNING: Dataset has only 1 row — profiling will be limited.")
+
+    # Detect fully null columns
+    null_cols = [col for col in df.columns if df[col].isna().all()]
+    if null_cols:
+        _log(state, f"PROFILER WARNING: Fully null columns detected: {null_cols}")
+
+    state["schema_info"] = str(df.dtypes)
+    state["data_sample"] = df.sample(min(SAMPLE_SIZE, len(df)), random_state=42).to_json(orient='records')
+
+    state["metrics"] = {
+        "initial_nans": int(df.isna().sum().sum()),
+        "initial_rows": len(df),
+        "initial_cols": len(df.columns),
+        "initial_memory_kb": float(df.memory_usage(deep=True).sum() / 1024),
+        "null_columns": null_cols,
     }
+    state["retry_count"] = state.get("retry_count", 0)
+    state["feedback_loop"] = state.get("feedback_loop", "")
+    state["executive_narrative"] = state.get("executive_narrative", "")
+    state["analyst_findings"] = state.get("analyst_findings", {})
 
-def _as_bool(value: Any) -> bool:
-    return value if isinstance(value, bool) else str(value).strip().lower() in {"1", "true", "yes", "y"}
-
-def build_profile(values: dict[str, Any]) -> StudyProfile:
-    return StudyProfile(
-        title=str(values.get("title", "Untitled study")).strip() or "Untitled study",
-        study_design=str(values.get("study_design", "observational study")).strip(),
-        sample_size=max(int(values.get("sample_size", 0)), 0),
-        outcome_count=max(int(values.get("outcome_count", 0)), 0),
-        primary_outcome=str(values.get("primary_outcome", "")).strip(),
-        has_preregistration=_as_bool(values.get("has_preregistration")),
-        has_power_analysis=_as_bool(values.get("has_power_analysis")),
-        has_data_management_plan=_as_bool(values.get("has_data_management_plan")),
-        has_code_repository=_as_bool(values.get("has_code_repository")),
-        has_blinding=_as_bool(values.get("has_blinding")),
-        has_ethics_approval=_as_bool(values.get("has_ethics_approval")),
-        data_sensitivity=str(values.get("data_sensitivity", "standard")).strip().lower(),
-    )
-
-def _query_plan(profile: StudyProfile) -> list[str]:
-    return [
-        f"{profile.study_design} preregistration primary outcome reporting guidance",
-        f"{profile.study_design} sample size power analysis reproducibility guidance",
-        f"{profile.data_sensitivity} data management code sharing ethics blinding guidance",
-    ]
-
-@tool
-def calculate_reproducibility_risk(profile_json: str, committed_controls: str = "") -> dict[str, Any]:
-    """Score reproducibility risks using a strictly mathematical / rigid calculation layer.
-    The rule sets here represent programmatic hard-constraints independent of the LLM generation step.
-    """
-    profile = StudyProfile(**json.loads(profile_json))
-    controls = {item.strip() for item in committed_controls.split(",") if item.strip()}
-    checks: list[dict[str, Any]] = []
-
-    def add_check(control: str, condition: bool, weight: int, recommendation: str) -> None:
-        planned = control in controls
-        checks.append({
-            "control": control,
-            "verified": condition,
-            "planned": planned and not condition,
-            "risk_points": 0 if condition or planned else weight,
-            "recommendation": recommendation,
-        })
-
-    add_check("preregistration", profile.has_preregistration, 18, "Register hypotheses, analysis plan, and stopping rule before collecting data.")
-    add_check("power_analysis", profile.has_power_analysis, 16, "Document a power analysis or a justified precision target.")
-    add_check("primary_outcome", bool(profile.primary_outcome), 14, "Name one primary outcome and distinguish secondary/exploratory outcomes.")
-    add_check("data_management", profile.has_data_management_plan, 12, "Create a data-management plan covering access, retention, and de-identification.")
-    add_check("code_repository", profile.has_code_repository, 10, "Version analysis code and specify a repository/release plan.")
-    add_check("ethics_approval", profile.has_ethics_approval, 15 if profile.data_sensitivity == "health" else 8, "Obtain and document required ethics review before execution.")
-    if profile.study_design == "randomized trial":
-        add_check("blinding", profile.has_blinding, 8, "Document assessor blinding or explain why blinding is not feasible.")
-    if profile.sample_size > 0 and profile.sample_size < 30:
-        add_check("small_sample_rationale", False, 8, "Add a pilot-study rationale and limits on inference for the small sample.")
-    if profile.outcome_count > 3:
-        add_check("multiplicity_plan", False, 7, "Add a multiplicity strategy or label additional outcomes exploratory.")
-
-    risk_score = sum(check["risk_points"] for check in checks)
-    readiness = "ready" if risk_score <= 12 else "conditional" if risk_score <= 35 else "high risk"
-    gaps = [check for check in checks if not check["verified"] and not check["planned"]]
-    
-    return {
-        "risk_score": risk_score,
-        "readiness": readiness,
-        "checks": checks,
-        "gaps": gaps,
-        "verified_controls": sum(1 for check in checks if check["verified"]),
-        "planned_controls": sum(1 for check in checks if check["planned"]),
-    }
-
-def ingest_protocol(state: AuditState) -> AuditState:
-    profile = state["profile"]
-    state.setdefault("iteration", 0)
-    state.setdefault("committed_controls", [])
-    state.setdefault("audit_history", [])
-    state["queries"] = _query_plan(profile)
-    AUDIT_STORE.put(("reprotrace", profile.title.lower()), "profile", asdict(profile))
+    fd, tmp_path = tempfile.mkstemp(suffix=".csv")
+    os.close(fd)
+    df.to_csv(tmp_path, index=False)
+    state["working_csv_path"] = tmp_path
     return state
 
-def retrieve_evidence(state: AuditState) -> AuditState:
-    retriever = _build_retriever()
-    evidence: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for query in state["queries"]:
-        for document in retriever.invoke(query):
-            if document.page_content in seen:
-                continue
-            seen.add(document.page_content)
-            evidence.append({"content": document.page_content, **document.metadata})
-    state["evidence"] = evidence
-    return state
+# Few-shot examples for the planner
+_PLANNER_FEW_SHOT = """
+Example 1 — E-commerce revenue dataset:
+Schema: transaction_id(int64), revenue(object), status(object), date(object)
+Sample: [{"transaction_id":1,"revenue":"$450.50","status":"COMPLETED","date":"2024-01-15"}]
+Good Plan:
+{"steps": [
+  {"column_name": "revenue", "operation": "cast_numeric", "reason": "Currency strings need numeric conversion"},
+  {"column_name": "revenue", "operation": "impute_median", "reason": "Median handles skewed monetary distributions better than mean"},
+  {"column_name": "revenue", "operation": "flag_zscore_anomalies", "reason": "Detect monetary outliers"},
+  {"column_name": "status", "operation": "standardize_categorical_text", "reason": "Mixed casing and abbreviations"},
+  {"column_name": "date", "operation": "parse_dates", "reason": "Multiple date formats present"},
+  {"column_name": "transaction_id", "operation": "leave_alone", "reason": "Primary key, no transformation needed"}
+]}
 
-def audit_protocol(state: AuditState) -> AuditState:
-    profile_json = json.dumps(asdict(state["profile"]))
-    audit = calculate_reproducibility_risk.invoke({
-        "profile_json": profile_json, 
-        "committed_controls": ",".join(state["committed_controls"])
-    })
-    audit["iteration"] = state["iteration"]
-    state["audit"] = audit
-    state["audit_history"].append({"iteration": state["iteration"], "risk_score": audit["risk_score"], "readiness": audit["readiness"]})
-    return state
-
-def route_after_audit(state: AuditState) -> str:
-    if state["audit"]["risk_score"] <= 12 or state["iteration"] >= 2:
-        return "finalize"
-    return "plan_mitigations"
-
-def plan_mitigations(state: AuditState) -> AuditState:
-    # Deterministic fallback mechanism simulating an Agent Action layer making controlled improvements. 
-    gaps = state["audit"].get("gaps", [])
-    additions = [gap["control"] for gap in gaps[:2]]
-    for control in additions:
-        if control not in state["committed_controls"]:
-            state["committed_controls"].append(control)
-    
-    state["iteration"] += 1
-    AUDIT_STORE.put(
-        ("reprotrace", state["profile"].title.lower()),
-        f"plan-{state['iteration']}",
-        {"planned_controls": additions, "risk_before": state["audit"]["risk_score"]},
-    )
-    return state
-
-def _build_passport(state: AuditState) -> str:
-    profile = state["profile"]
-    audit = state["audit"]
-    evidence = state.get("evidence", [])
-    
-    citations = "\n".join(f"- **{item.get('source', 'Local evidence')}** ({item.get('year', 'n.d.')}) — {item['content']}" for item in evidence)
-    checks = "\n".join(f"- {'🟢 VERIFIED' if check['verified'] else '🟡 PLANNED' if check['planned'] else '🔴 GAP'} — **{check['control']}**: {check['recommendation']}" for check in audit["checks"])
-    history = "\n".join(f"- Loop {item['iteration']}: risk score **{item['risk_score']}** ({item['readiness']})" for item in state["audit_history"])
-    
-    return f"""# 🔬 ReproTrace Passport
-
-## Decision Overview
-- **Study Identifier**: {profile.title}
-- **Current Operational Readiness**: **{str(audit['readiness']).upper()}**
-- **Residual Risk**: **{audit['risk_score']}/100**
-- **Architecture**: {audit['verified_controls']} Pre-existing, {audit['planned_controls']} Planned
-
-## Architectural Ledger
-{checks}
-
-## Mitigation Generation Path (State Changes)
-{history}
-
-## Local Methodological Precedents Mapped
-{citations or '- None retrieved.'}
-
-*This passport bridges abstract methodology logic constraints directly onto dynamic study proposals using a grounded computational rule-set over MQR indexing.*
+Example 2 — Sensor readings dataset:
+Schema: sensor_id(object), temp_c(object), humidity(float64), timestamp(object)
+Sample: [{"sensor_id":"S-001","temp_c":"23.5","humidity":45.2,"timestamp":"2024-03-01T10:00:00"}]
+Good Plan:
+{"steps": [
+  {"column_name": "temp_c", "operation": "cast_numeric", "reason": "Stored as string, needs numeric type"},
+  {"column_name": "temp_c", "operation": "impute_mean_values", "reason": "Temperature is normally distributed, mean imputation appropriate"},
+  {"column_name": "temp_c", "operation": "flag_zscore_anomalies", "reason": "Detect sensor malfunctions via outlier readings"},
+  {"column_name": "humidity", "operation": "normalize_min_max", "reason": "Scale to [0,1] for ML model input"},
+  {"column_name": "timestamp", "operation": "parse_dates", "reason": "ISO timestamp needs datetime parsing"},
+  {"column_name": "sensor_id", "operation": "leave_alone", "reason": "Identifier column"}
+]}
 """
 
-def finalize_passport(state: AuditState) -> AuditState:
-    passport = _build_passport(state)
-    output_path = state.get("report_path", str(DEFAULT_OUTPUT_PATH))
-    
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(passport, encoding="utf-8")
-    
-    state["passport_markdown"] = passport
-    state["report_path"] = output_path
+def orchestrate_plan(state: GraphState) -> GraphState:
+    """LLM acts as Senior Data Scientist, determining cleaning and anomaly tracking strategy."""
+    _log(state, "STRATEGIST: Architecting machine learning feature-prep plan...")
+    llm = get_llm().with_structured_output(CleaningPlan)
+
+    sys_prompt = (
+        "You are a Senior ML Engineer pipeline logic agent. Map deterministic data operations.\n"
+        "Available operations:\n"
+        "  - cast_numeric: Convert string columns masking as numbers (prices, currencies, measurements)\n"
+        "  - standardize_categorical_text: Uppercase + trim chaotic categorical columns, map NULL-like values to UNKNOWN\n"
+        "  - parse_dates: Convert date strings to datetime objects\n"
+        "  - impute_mean_values: Fill NaNs with column mean (use for normally distributed numeric data)\n"
+        "  - impute_median: Fill NaNs with column median (use for skewed numeric data like revenue)\n"
+        "  - impute_mode: Fill NaNs with most frequent value (use for categorical columns)\n"
+        "  - flag_zscore_anomalies: Flag statistical outliers using Z-score (only on numeric columns AFTER casting)\n"
+        "  - normalize_min_max: Scale numeric column to [0,1] range (for ML feature prep)\n"
+        "  - drop_duplicates: Remove duplicate rows from the dataset\n"
+        "  - drop_column: Remove a column entirely (for junk, PII, or irrelevant columns)\n"
+        "  - leave_alone: No transformation needed\n\n"
+        "Rules:\n"
+        "1. ALWAYS apply cast_numeric BEFORE impute or zscore on the same column.\n"
+        "2. NEVER apply numeric operations (cast_numeric, impute_mean, normalize) to ID or name columns.\n"
+        "3. Prefer impute_median over impute_mean for monetary/revenue columns (skewed distributions).\n"
+        "4. Use impute_mode for categorical columns with missing values.\n"
+        "5. Apply flag_zscore_anomalies ONLY on high-priority measurement/monetary columns.\n"
+        "6. Use drop_duplicates if the dataset likely has repeated rows.\n"
+        "Output ONLY the rigid Pydantic JSON.\n\n"
+        f"Reference examples:\n{_PLANNER_FEW_SHOT}"
+    )
+
+    context_str = f"Special Domain Context: {state['domain_context']}\n\n" if state.get('domain_context') else ""
+    feedback = f"\nURGENT FEEDBACK FROM QA: {state.get('feedback_loop', '')}\nAvoid your previous mistake." if state.get("feedback_loop") else ""
+    null_cols_info = f"\nFully null columns (consider drop_column): {state['metrics'].get('null_columns', [])}" if state['metrics'].get('null_columns') else ""
+    human_prompt = f"{context_str}{feedback}{null_cols_info}\nSchema:\n{state['schema_info']}\n\nSample:\n{state['data_sample']}\n\nOutput pipeline schema."
+
+    plan = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=human_prompt)])
+    state["plan"] = plan.model_dump()
     return state
 
-def build_workflow() -> StateGraph:
-    graph = StateGraph(AuditState)
-    graph.add_node("ingest_protocol", ingest_protocol)
-    graph.add_node("retrieve_evidence", retrieve_evidence)
-    graph.add_node("audit_protocol", audit_protocol)
-    graph.add_node("plan_mitigations", plan_mitigations)
-    graph.add_node("finalize", finalize_passport)
-    
-    graph.add_edge(START, "ingest_protocol")
-    graph.add_edge("ingest_protocol", "retrieve_evidence")
-    graph.add_edge("retrieve_evidence", "audit_protocol")
-    graph.add_conditional_edges("audit_protocol", route_after_audit)
-    graph.add_edge("plan_mitigations", "audit_protocol")
-    graph.add_edge("finalize", END)
-    
-    return graph.compile(checkpointer=MemorySaver())
+def review_plan(state: GraphState) -> GraphState:
+    """Plan Reviewer agent validates the cleaning plan before execution."""
+    _log(state, "REVIEWER: Validating cleaning plan for logical consistency...")
+    llm = get_llm().with_structured_output(CleaningPlan)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ReproTrace Orchestrator CLI")
-    parser.add_argument("--scenario", choices=list(get_sample_scenarios()), default="under-specified study")
-    parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH))
-    parser.add_argument("--thread-id", default="reprotrace-terminal-run")
-    args = parser.parse_args()
+    plan_json = state["plan"]
+    schema_info = state["schema_info"]
 
-    profile = build_profile(get_sample_scenarios()[args.scenario])
-    print("Initiating graph traversal (See Streamlit for interactive mode)...")
-    final_state = build_workflow().invoke(
-        {"profile": profile, "report_path": args.output},
-        {"configurable": {"thread_id": args.thread_id}},
+    review_prompt = (
+        "You are a QA reviewer for data cleaning plans. Review the following plan and FIX any issues.\n"
+        "Rules to check:\n"
+        "1. impute_mean_values / impute_median should NOT be applied to date columns.\n"
+        "2. cast_numeric should NOT be applied to ID columns (like transaction_id) or name columns.\n"
+        "3. flag_zscore_anomalies should only appear AFTER cast_numeric on the same column.\n"
+        "4. normalize_min_max should only be applied to numeric columns.\n"
+        "5. No conflicting operations on the same column (e.g., drop_column + cast_numeric).\n"
+        "6. If a column is dropped, remove all other operations on it.\n\n"
+        "If the plan is correct, return it unchanged. If issues exist, return the FIXED plan.\n\n"
+        f"Schema:\n{schema_info}\n\n"
+        f"Plan to review:\n{plan_json}\n\n"
+        "Output the validated/fixed plan as Pydantic JSON."
     )
-    
-    print("\n----------------\nPASSPORT EXPORT:\n----------------\n")
-    print(final_state["passport_markdown"])
-    print(f"\nWritten cleanly to disk @ {final_state['report_path']}")
+
+    reviewed = llm.invoke([SystemMessage(content="You are a meticulous data pipeline QA reviewer."),
+                           HumanMessage(content=review_prompt)])
+    state["plan"] = reviewed.model_dump()
+    _log(state, "REVIEWER: Plan validated and approved for execution.")
+    return state
+
+def python_executor(state: GraphState) -> GraphState:
+    """Data processing loop: strictly executing operations mapped by the agent."""
+    df = pd.read_csv(state["working_csv_path"])
+    plan = _sort_plan_steps(state["plan"]["steps"])
+
+    for step in plan:
+        col = step["column_name"]
+        op = step["operation"]
+
+        # drop_duplicates operates on the full DataFrame, not a column
+        if op == "drop_duplicates":
+            before = len(df)
+            df = df.drop_duplicates()
+            removed = before - len(df)
+            _log(state, f"EXECUTING: drop_duplicates -> Removed {removed} duplicate rows.")
+            continue
+
+        if col not in df.columns:
+            _log(state, f"SKIPPED [{col}]: Column not found in DataFrame.")
+            continue
+
+        try:
+            _log(state, f"EXECUTING [{col}]: {op}")
+            if op == "cast_numeric":
+                df[col] = df[col].astype(str).str.replace(r'[^\d\.\-]', '', regex=True)
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            elif op == "impute_mean_values":
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].fillna(df[col].mean())
+
+            elif op == "impute_median":
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                col_median = df[col].median()
+                df[col] = df[col].fillna(col_median)
+                _log(state, f"  --> Imputed with median value: {col_median:.2f}")
+
+            elif op == "impute_mode":
+                mode_val = df[col].mode()
+                if not mode_val.empty:
+                    df[col] = df[col].fillna(mode_val.iloc[0])
+                    _log(state, f"  --> Imputed with mode value: {mode_val.iloc[0]}")
+
+            elif op == "flag_zscore_anomalies":
+                numeric_col = pd.to_numeric(df[col], errors='coerce')
+                mean = numeric_col.mean()
+                std = numeric_col.std()
+                if not pd.isna(std) and std != 0:
+                    df[f"{col}_zscore_anomaly"] = np.abs((numeric_col - mean) / std) > ZSCORE_THRESHOLD
+                    outlier_count = int(df[f"{col}_zscore_anomaly"].sum())
+                    _log(state, f"  --> ML Insight: Identified {outlier_count} outliers (threshold: {ZSCORE_THRESHOLD} std).")
+
+            elif op == "standardize_categorical_text":
+                df[col] = df[col].astype(str).str.upper().str.strip()
+                df.loc[df[col].isin(['NAN', 'NULL', 'NONE', '']), col] = 'UNKNOWN'
+
+            elif op == "parse_dates":
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+
+            elif op == "normalize_min_max":
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                col_min = df[col].min()
+                col_max = df[col].max()
+                if col_max != col_min:
+                    df[col] = (df[col] - col_min) / (col_max - col_min)
+                    _log(state, f"  --> Normalized to [0, 1] range (min={col_min:.2f}, max={col_max:.2f}).")
+                else:
+                    _log(state, f"  --> SKIPPED normalization: constant column (all values = {col_min}).")
+
+            elif op == "drop_column":
+                df = df.drop(columns=[col])
+                _log(state, f"  --> Column '{col}' removed from dataset.")
+
+            elif op == "leave_alone":
+                pass
+
+        except Exception as e:
+            _log(state, f"❌ ML ERROR during {op} on [{col}]: {e}")
+
+    state["metrics"]["final_nans"] = int(df.isna().sum().sum())
+    state["metrics"]["final_rows"] = len(df)
+    state["metrics"]["final_cols"] = len(df.columns)
+    state["metrics"]["final_memory_kb"] = float(df.memory_usage(deep=True).sum() / 1024)
+
+    df.to_csv(state["working_csv_path"], index=False)
+    state["status"] = "PIPELINE COMPLETED SUCCESS"
+    return state
+
+def qa_validator(state: GraphState) -> GraphState:
+    """True LangGraph Cyclical Validation Layer."""
+    _log(state, "QA-AGENT: Verifying final dataframe topology.")
+    df = pd.read_csv(state["working_csv_path"])
+
+    remaining_nulls = int(df.isna().sum().sum())
+    if remaining_nulls > 0 and state["retry_count"] < MAX_RETRIES:
+        state["retry_count"] += 1
+        state["feedback_loop"] = f"Failed validation: Dataset still has {remaining_nulls} nulls. Ensure you use 'impute_mean_values', 'impute_median', or 'impute_mode' to handle NaN values aggressively!"
+        _log(state, "QA-REJECTED: Sending failure signals backward through the graph timeline...")
+        return state
+
+    state["feedback_loop"] = "APPROVED"
+    return state
+
+def data_analyst_narrator(state: GraphState) -> GraphState:
+    """The Intelligence layer. AI explains its ML anomaly findings with structured output."""
+    _log(state, "ANALYST-AGENT: Compiling Natural Language Intelligence Report...")
+    df = pd.read_csv(state["working_csv_path"])
+
+    anomalies = {col: int(df[col].sum()) for col in df.columns if 'anom' in col.lower()}
+
+    context_data = f"""
+    Initial Empty Slots: {state['metrics'].get('initial_nans', 0)}, Final: {state['metrics'].get('final_nans', 'N/A')}.
+    Initial Rows: {state['metrics'].get('initial_rows', '?')}, Final Rows: {state['metrics'].get('final_rows', '?')}.
+    Initial Columns: {state['metrics'].get('initial_cols', '?')}, Final Columns: {state['metrics'].get('final_cols', '?')}.
+    Outliers Detected: {anomalies}.
+    Domain Focus: {state.get('domain_context', 'General')}
+    Operations Applied: {[s['operation'] for s in state['plan'].get('steps', [])]}
+    """
+
+    # Try structured output first, fall back to narrative-only
+    try:
+        llm = get_llm().with_structured_output(AnalystFindings)
+        msg = (
+            "Analyze these data science pipeline results and produce a structured report.\n"
+            "Include a 2-paragraph executive narrative, key metrics, detected anomalies, and actionable recommendations.\n"
+            f"{context_data}"
+        )
+        findings = llm.invoke([SystemMessage(content="You are a Senior Data Analyst writing an executive intelligence report."),
+                                HumanMessage(content=msg)])
+        state["analyst_findings"] = findings.model_dump()
+        state["executive_narrative"] = findings.narrative
+    except Exception:
+        # Fallback: unstructured narrative
+        llm = get_llm()
+        msg = f"Write a powerful, 2-paragraph Executive Data Science narrative analyzing these results. Make it sound highly professional and insight-focused based on anomalies detected.\n{context_data}"
+        narrative = llm.invoke(msg).content
+        state["executive_narrative"] = narrative
+        state["analyst_findings"] = {
+            "narrative": narrative,
+            "key_metrics": state["metrics"],
+            "anomalies_found": [{"column": k, "count": v} for k, v in anomalies.items()],
+            "recommendations": [],
+        }
+
+    return state
+
+def graph_router(state: GraphState) -> Literal["Planner", "Data Analyst"]:
+    """Directs Graph Flow backwards into a self-reflection loop if QA fails."""
+    if state.get("feedback_loop") == "APPROVED":
+        return "Data Analyst"
+    if state["retry_count"] >= MAX_RETRIES:
+        _log(state, f"⚠️ QA-AGENT: Proceeding despite {state['metrics'].get('final_nans', '?')} unresolved nulls (max retries exhausted).")
+        return "Data Analyst"
+    return "Planner"
+
+# --- 5. GRAPH COMPILER ---
+def build_pipeline(checkpointer=None):
+    graph = StateGraph(GraphState)
+    graph.add_node("Profiler", analyze_and_profile)
+    graph.add_node("Planner", orchestrate_plan)
+    graph.add_node("Plan Reviewer", review_plan)
+    graph.add_node("Executor", python_executor)
+    graph.add_node("QA Validator", qa_validator)
+    graph.add_node("Data Analyst", data_analyst_narrator)
+
+    # Forward edges
+    graph.add_edge(START, "Profiler")
+    graph.add_edge("Profiler", "Planner")
+    graph.add_edge("Planner", "Plan Reviewer")
+    graph.add_edge("Plan Reviewer", "Executor")
+    graph.add_edge("Executor", "QA Validator")
+
+    # CYCLICAL MAGIC: Evaluates, loops back, or proceeds
+    graph.add_conditional_edges("QA Validator", graph_router, {"Data Analyst": "Data Analyst", "Planner": "Planner"})
+    graph.add_edge("Data Analyst", END)
+
+    return graph.compile(checkpointer=checkpointer)
+
+
+def cleanup_temp_files(state: GraphState) -> None:
+    """Remove temporary CSV files created during pipeline execution."""
+    tmp = state.get("working_csv_path", "")
+    if tmp and os.path.exists(tmp) and tempfile.gettempdir() in os.path.dirname(os.path.abspath(tmp)):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def main(csv_path: str | None = None) -> dict:
+    """CLI entry point: runs the AutoWrangler pipeline on a CSV file."""
+    import sys
+
+    target = csv_path or (sys.argv[1] if len(sys.argv) > 1 else str(PROJECT_ROOT / "data" / "messy_data.csv"))
+    if not os.path.exists(target):
+        print(f"Error: File not found — {target}")
+        sys.exit(1)
+
+    print(f"AutoWrangler — Processing: {target}")
+    workflow = build_pipeline()
+    result = workflow.invoke({
+        "input_csv_path": target, "working_csv_path": "",
+        "schema_info": "", "data_sample": "", "domain_context": "",
+        "plan": {}, "logs": [], "metrics": {}, "executive_narrative": "",
+        "analyst_findings": {},
+        "retry_count": 0, "feedback_loop": "", "status": ""
+    })
+
+    print("\n--- Pipeline Complete ---")
+    print(f"  Rows processed: {result['metrics'].get('initial_rows', '?')}")
+    print(f"  Initial NaNs:   {result['metrics'].get('initial_nans', '?')}")
+    print(f"  Final NaNs:     {result['metrics'].get('final_nans', '?')}")
+    print(f"  Retries:        {result['retry_count']}")
+    print(f"\n{result.get('executive_narrative', '')}")
+
+    cleanup_temp_files(result)
+    return result
