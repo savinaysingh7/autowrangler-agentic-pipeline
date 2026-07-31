@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,7 +11,7 @@ from main import (
     build_pipeline, cleanup_temp_files, ZSCORE_THRESHOLD,
     analyze_and_profile, orchestrate_plan, review_plan,
     python_executor, qa_validator, data_analyst_narrator,
-    OPERATION_PRIORITY,
+    OPERATION_PRIORITY, get_llm,
 )
 
 st.set_page_config(page_title="AutoWrangler v3", page_icon="🧪", layout="wide", initial_sidebar_state="expanded")
@@ -59,8 +60,15 @@ with st.sidebar:
     ctx = st.text_area("Pre-Analysis Briefing (Agent Directives)", default_directive)
 
     with st.expander("⚙️ Advanced Pipeline Parameters", expanded=False):
+        provider_choice = st.selectbox("LLM Reasoning Model", ["Groq (Llama-3.3-70B)", "Mistral (Mistral Large)", "Ollama (Local)"], index=0)
         zscore_val = st.slider("Z-Score Anomaly Threshold (StdDev)", min_value=1.5, max_value=5.0, value=3.0, step=0.1)
         max_retries_val = st.slider("Max QA Retry Attempts", min_value=1, max_value=3, value=1, step=1)
+
+    provider_map = {
+        "Groq (Llama-3.3-70B)": "groq",
+        "Mistral (Mistral Large)": "mistral",
+        "Ollama (Local)": "ollama"
+    }
 
     run_btn = st.button("🚀 LAUNCH PIPELINE", type="primary", use_container_width=True)
 
@@ -73,7 +81,8 @@ if run_btn:
         "analyst_findings": {},
         "retry_count": 0, "feedback_loop": "", "status": "",
         "zscore_threshold": float(zscore_val),
-        "max_retries": int(max_retries_val)
+        "max_retries": int(max_retries_val),
+        "llm_provider": provider_map.get(provider_choice, "groq")
     }
     with st.status("Initializing AutoWrangler Pipeline...", expanded=True) as status:
         try:
@@ -148,10 +157,10 @@ if "out" in st.session_state:
 
     st.divider()
 
-    # --- Tabbed Architecture (6 tabs) ---
-    t1, t2, t3, t4, t5, t6 = st.tabs([
+    # --- Tabbed Architecture (7 tabs) ---
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
         "📋 Data Matrix", "📊 Visualizations", "🔄 Before / After",
-        "📈 Data Profile", "🤖 Agent Comms", "📦 Export"
+        "📈 Data Profile", "🤖 Agent Comms", "📦 Export", "💬 Chat with Data"
     ])
 
     # --- Tab 1: Data Matrix ---
@@ -161,7 +170,7 @@ if "out" in st.session_state:
 
     # --- Tab 2: Plotly Visualizations ---
     with t2:
-        numerics = clean_df.select_dtypes(include=['float64', 'int64']).columns.tolist()
+        numerics = clean_df.select_dtypes(include=['float64', 'int64', 'float32', 'int32']).columns.tolist()
         anom_cols = [c for c in clean_df.columns if 'anom' in c.lower()]
 
         if numerics:
@@ -294,10 +303,10 @@ if "out" in st.session_state:
     # --- Tab 6: Export Payload ---
     with t6:
         st.markdown("### 💾 Multi-Format Exports")
-        exp_col1, exp_col2, exp_col3 = st.columns(3)
+        exp_col1, exp_col2, exp_col3, exp_col4 = st.columns(4)
 
         exp_col1.download_button(
-            "📄 Download Cleaned CSV",
+            "📄 Cleaned CSV",
             clean_df.to_csv(index=False),
             file_name="sanitized_data.csv",
             mime="text/csv",
@@ -305,10 +314,26 @@ if "out" in st.session_state:
         )
 
         exp_col2.download_button(
-            "📦 Download Cleaned JSON",
+            "📦 Cleaned JSON",
             clean_df.to_json(orient="records", indent=2),
             file_name="sanitized_data.json",
             mime="application/json",
+            use_container_width=True
+        )
+
+        # Generate SQLite DB buffer
+        db_path = os.path.join(tempfile.gettempdir(), "sanitized_data.db")
+        conn = sqlite3.connect(db_path)
+        clean_df.to_sql("clean_dataset", conn, if_exists="replace", index=False)
+        conn.close()
+        with open(db_path, "rb") as f:
+            db_bytes = f.read()
+
+        exp_col3.download_button(
+            "🗄️ SQLite DB (.db)",
+            db_bytes,
+            file_name="sanitized_data.db",
+            mime="application/octet-stream",
             use_container_width=True
         )
 
@@ -316,8 +341,8 @@ if "out" in st.session_state:
         for p in res['plan'].get('steps', []):
             exec_report_md += f"- **{p['column_name']}**: `{p['operation']}` — {p['reason']}\n"
 
-        exp_col3.download_button(
-            "📝 Download Executive Report (.md)",
+        exp_col4.download_button(
+            "📝 Executive Report (.md)",
             exec_report_md,
             file_name="executive_report.md",
             mime="text/markdown",
@@ -365,3 +390,36 @@ if "out" in st.session_state:
 
         st.code(script_code, language='python')
         st.download_button(label="📥 Download ml_pipeline.py", data=script_code, file_name="ml_pipeline.py")
+
+    # --- Tab 7: Chat with Data ---
+    with t7:
+        st.markdown("### 💬 Ask Questions About Your Cleaned Data")
+        st.caption("Powered by LLM reasoning over the post-pipeline DataFrame topology.")
+
+        if "messages" not in st.session_state:
+            st.session_state["messages"] = []
+
+        for msg in st.session_state["messages"]:
+            st.chat_message(msg["role"]).write(msg["content"])
+
+        user_query = st.chat_input("Ask a question about the dataset (e.g., 'Summarize column averages' or 'Which row had the highest value?')")
+
+        if user_query:
+            st.session_state["messages"].append({"role": "user", "content": user_query})
+            st.chat_message("user").write(user_query)
+
+            with st.spinner("AI analyzing dataset..."):
+                try:
+                    llm = get_llm(res.get("llm_provider"))
+                    data_summary = f"Columns: {list(clean_df.columns)}\nRows: {len(clean_df)}\nSummary Stats:\n{clean_df.describe(include='all').to_string()[:2000]}"
+                    prompt = (
+                        "You are an expert Data Analyst assistant. Answer the user's question accurately using the provided dataset summary.\n\n"
+                        f"Dataset Summary:\n{data_summary}\n\n"
+                        f"User Question: {user_query}"
+                    )
+                    reply = llm.invoke(prompt).content
+                except Exception as ex:
+                    reply = f"Error generating response: {ex}"
+
+                st.session_state["messages"].append({"role": "assistant", "content": reply})
+                st.chat_message("assistant").write(reply)

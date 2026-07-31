@@ -81,9 +81,9 @@ class GraphState(TypedDict):
     status: str
 
 # --- 3. MODEL ROUTER ---
-def get_llm():
-    """Auto-detects and returns available LLM provider based on environment keys."""
-    provider = LLM_PROVIDER
+def get_llm(provider_override: str | None = None):
+    """Auto-detects and returns available LLM provider based on environment keys or provider override."""
+    provider = (provider_override or LLM_PROVIDER).lower()
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
     mistral_key = os.getenv("MISTRAL_API_KEY", "").strip()
 
@@ -203,7 +203,8 @@ Good Plan:
 def orchestrate_plan(state: GraphState) -> GraphState:
     """LLM acts as Senior Data Scientist, determining cleaning and anomaly tracking strategy."""
     _log(state, "STRATEGIST: Architecting machine learning feature-prep plan...")
-    llm = get_llm().with_structured_output(CleaningPlan)
+    provider = state.get("llm_provider")
+    llm = get_llm(provider).with_structured_output(CleaningPlan)
 
     sys_prompt = (
         "You are a Senior ML Engineer pipeline logic agent. Map deterministic data operations.\n"
@@ -242,8 +243,9 @@ def orchestrate_plan(state: GraphState) -> GraphState:
 def review_plan(state: GraphState) -> GraphState:
     """Plan Reviewer agent validates the cleaning plan before execution."""
     _log(state, "REVIEWER: Validating cleaning plan for logical consistency...")
+    provider = state.get("llm_provider")
     try:
-        llm = get_llm().with_structured_output(CleaningPlan)
+        llm = get_llm(provider).with_structured_output(CleaningPlan)
 
         plan_json = state["plan"]
         schema_info = state["schema_info"]
@@ -388,6 +390,7 @@ def data_analyst_narrator(state: GraphState) -> GraphState:
     """The Intelligence layer. AI explains its ML anomaly findings with structured output."""
     _log(state, "ANALYST-AGENT: Compiling Natural Language Intelligence Report...")
     df = pd.read_csv(state["working_csv_path"])
+    provider = state.get("llm_provider")
 
     anomalies = {col: int(df[col].sum()) for col in df.columns if 'anom' in col.lower()}
 
@@ -402,7 +405,7 @@ def data_analyst_narrator(state: GraphState) -> GraphState:
 
     # Try structured output first, fall back to narrative-only
     try:
-        llm = get_llm().with_structured_output(AnalystFindings)
+        llm = get_llm(provider).with_structured_output(AnalystFindings)
         msg = (
             "Analyze these data science pipeline results and produce a structured report.\n"
             "Include a 2-paragraph executive narrative, key metrics, detected anomalies, and actionable recommendations.\n"
@@ -414,7 +417,7 @@ def data_analyst_narrator(state: GraphState) -> GraphState:
         state["executive_narrative"] = findings.narrative
     except Exception:
         # Fallback: unstructured narrative
-        llm = get_llm()
+        llm = get_llm(provider)
         msg = f"Write a powerful, 2-paragraph Executive Data Science narrative analyzing these results. Make it sound highly professional and insight-focused based on anomalies detected.\n{context_data}"
         narrative = llm.invoke(msg).content
         state["executive_narrative"] = narrative
