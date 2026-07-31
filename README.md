@@ -1,6 +1,6 @@
 # 🧬 AutoWrangler: Agentic Data Science Pipeline
 
-[![AutoWrangler CI](https://github.com/savinaysingh7/reprotrace-audit-orchestrator/actions/workflows/test.yml/badge.svg)](https://github.com/savinaysingh7/reprotrace-audit-orchestrator/actions/workflows/test.yml)
+[![AutoWrangler CI](https://github.com/savinaysingh7/autowrangler-agentic-pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/savinaysingh7/autowrangler-agentic-pipeline/actions/workflows/test.yml)
 
 **AutoWrangler** is a constrained Multi-Agent workflow orchestrator that bridges the gap between Large Language Model reasoning and strictly typed Machine Learning (ML) data-preparation operations.
 
@@ -42,9 +42,10 @@ Profiler → Planner (LLM) → Plan Reviewer (LLM) → Executor → QA Validator
 - **Smart Operation Ordering**: Auto-sorts operations (cast → impute → normalize → zscore)
 - **Plan Review Agent**: LLM validates its own plan before execution
 - **Model Agnostic**: Groq, Mistral, or Ollama (local) via `.env`
+- **Dynamic Settings & Presets**: Z-Score threshold slider ($1.5\sigma - 5.0\sigma$), max retries slider, and domain dataset presets (E-Commerce, Real Estate Zoning, IoT Telemetry)
 - **Interactive Plotly Dashboards**: Histograms, correlation heatmaps, missing data maps
 - **Before/After Comparison**: Side-by-side dirty vs clean data view
-- **Production Code Generator**: Auto-generates standalone Python pipeline scripts
+- **Multi-Format Exports**: Download sanitized data in CSV, JSON, Markdown Executive Report, and standalone Python scripts
 
 ## 💻 Tech Stack
 * **AI Orchestration**: LangGraph, LangChain Core
@@ -58,20 +59,22 @@ Profiler → Planner (LLM) → Plan Reviewer (LLM) → Executor → QA Validator
 ## 📁 Project Structure
 ```
 autowrangler/
-├── main.py              # Core LangGraph pipeline (6 agent nodes, graph compiler)
-├── app.py               # CLI entry point
-├── streamlit_app.py     # Interactive Streamlit dashboard (6 tabs)
-├── requirements.txt     # Python dependencies
-├── Dockerfile           # Container deployment
-├── .env                 # API keys (GROQ_API_KEY, MISTRAL_API_KEY)
+├── main.py                    # Core LangGraph pipeline (6 agent nodes, graph compiler)
+├── app.py                     # CLI entry point
+├── streamlit_app.py           # Interactive Streamlit dashboard (6 tabs, presets, sliders)
+├── requirements.txt           # Python dependencies
+├── Dockerfile                 # Container deployment
+├── .env                       # API keys (GROQ_API_KEY, MISTRAL_API_KEY)
 ├── data/
-│   └── messy_data.csv   # Demo dataset
-├── memory/              # SQLite checkpoints
-├── reports/             # Generated reports
+│   ├── messy_data.csv             # Demo E-Commerce dataset
+│   ├── zoning_compliance_data.csv # Real Estate Zoning dataset
+│   └── sensor_telemetry.csv       # IoT Sensor Telemetry dataset
+├── memory/                    # SQLite checkpoints
+├── reports/                   # Generated reports
 ├── tests/
-│   └── test_autowrangler.py
+│   └── test_autowrangler.py   # Pytest test suite (21 unit tests)
 └── .github/workflows/
-    └── test.yml         # CI/CD pipeline
+    └── test.yml               # CI/CD pipeline
 ```
 
 ## 🏁 Run It Locally

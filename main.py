@@ -82,19 +82,31 @@ class GraphState(TypedDict):
 
 # --- 3. MODEL ROUTER ---
 def get_llm():
-    if LLM_PROVIDER == "groq" and os.getenv("GROQ_API_KEY"):
+    """Auto-detects and returns available LLM provider based on environment keys."""
+    provider = LLM_PROVIDER
+    groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    mistral_key = os.getenv("MISTRAL_API_KEY", "").strip()
+
+    # Fallback auto-detection if specified provider key is missing
+    if provider == "groq" and not groq_key:
+        if mistral_key:
+            provider = "mistral"
+        else:
+            provider = "ollama"
+
+    if provider == "groq" and groq_key:
         from langchain_groq import ChatGroq
         return ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0)
-    elif LLM_PROVIDER == "mistral" and os.getenv("MISTRAL_API_KEY"):
+    elif provider == "mistral" and mistral_key:
         from langchain_mistralai import ChatMistralAI
         return ChatMistralAI(model="mistral-large-latest", temperature=0.0)
-    elif LLM_PROVIDER == "ollama":
+    elif provider == "ollama":
         from langchain_ollama import ChatOllama
         model_name = os.getenv("OLLAMA_MODEL", "llama3.1")
         return ChatOllama(model=model_name, temperature=0.0)
     else:
-        raise Exception("Requires a valid API Key or Ollama for Data Science Agent Mode. "
-                        "Set AUTOWRANGLER_LLM_PROVIDER and the corresponding key in .env")
+        raise Exception("Requires a valid API Key (GROQ_API_KEY or MISTRAL_API_KEY) or Ollama for Data Science Agent Mode. "
+                        "Please check your .env file.")
 
 def _log(state: GraphState, message: str) -> None:
     """Dual logging: append to state logs for UI and emit via Python logger."""
@@ -107,7 +119,7 @@ def _sort_plan_steps(steps: list[dict]) -> list[dict]:
 
 # --- 4. MULTI-AGENT NODES ---
 def analyze_and_profile(state: GraphState) -> GraphState:
-    """Reads dataset, grabs memory footprints, profiles types."""
+    """Reads dataset, grabs memory footprints, profiles types, and unmasks hidden nulls."""
     _log(state, "PROFILER: Scanning data file distributions...")
 
     input_path = state["input_csv_path"]
@@ -127,8 +139,14 @@ def analyze_and_profile(state: GraphState) -> GraphState:
     if len(df) == 1:
         _log(state, "PROFILER WARNING: Dataset has only 1 row — profiling will be limited.")
 
+    # Calculate true unmasked null count (native NaNs + hidden string representations like "NULL", "ERROR", "-", "N/A")
+    null_pattern = ['NAN', 'NULL', 'NONE', '', '-', 'N/A', 'ERROR']
+    unmasked_nans = int(df.apply(
+        lambda col: col.isna() | col.astype(str).str.upper().str.strip().isin(null_pattern)
+    ).sum().sum())
+
     # Detect fully null columns
-    null_cols = [col for col in df.columns if df[col].isna().all()]
+    null_cols = [col for col in df.columns if df[col].isna().all() or df[col].astype(str).str.upper().str.strip().isin(null_pattern).all()]
     if null_cols:
         _log(state, f"PROFILER WARNING: Fully null columns detected: {null_cols}")
 
@@ -136,7 +154,7 @@ def analyze_and_profile(state: GraphState) -> GraphState:
     state["data_sample"] = df.sample(min(SAMPLE_SIZE, len(df)), random_state=42).to_json(orient='records')
 
     state["metrics"] = {
-        "initial_nans": int(df.isna().sum().sum()),
+        "initial_nans": unmasked_nans,
         "initial_rows": len(df),
         "initial_cols": len(df.columns),
         "initial_memory_kb": float(df.memory_usage(deep=True).sum() / 1024),
@@ -224,36 +242,39 @@ def orchestrate_plan(state: GraphState) -> GraphState:
 def review_plan(state: GraphState) -> GraphState:
     """Plan Reviewer agent validates the cleaning plan before execution."""
     _log(state, "REVIEWER: Validating cleaning plan for logical consistency...")
-    llm = get_llm().with_structured_output(CleaningPlan)
+    try:
+        llm = get_llm().with_structured_output(CleaningPlan)
 
-    plan_json = state["plan"]
-    schema_info = state["schema_info"]
+        plan_json = state["plan"]
+        schema_info = state["schema_info"]
 
-    review_prompt = (
-        "You are a QA reviewer for data cleaning plans. Review the following plan and FIX any issues.\n"
-        "Rules to check:\n"
-        "1. impute_mean_values / impute_median should NOT be applied to date columns.\n"
-        "2. cast_numeric should NOT be applied to ID columns (like transaction_id) or name columns.\n"
-        "3. flag_zscore_anomalies should only appear AFTER cast_numeric on the same column.\n"
-        "4. normalize_min_max should only be applied to numeric columns.\n"
-        "5. No conflicting operations on the same column (e.g., drop_column + cast_numeric).\n"
-        "6. If a column is dropped, remove all other operations on it.\n\n"
-        "If the plan is correct, return it unchanged. If issues exist, return the FIXED plan.\n\n"
-        f"Schema:\n{schema_info}\n\n"
-        f"Plan to review:\n{plan_json}\n\n"
-        "Output the validated/fixed plan as Pydantic JSON."
-    )
+        review_prompt = (
+            "You are a QA reviewer for data cleaning plans. Review the following plan and FIX any issues.\n"
+            "Rules to check:\n"
+            "1. impute_mean_values / impute_median should NOT be applied to date columns.\n"
+            "2. cast_numeric should NOT be applied to ID columns (like transaction_id) or name columns.\n"
+            "3. flag_zscore_anomalies should only appear AFTER cast_numeric on the same column.\n"
+            "4. normalize_min_max should only be applied to numeric columns.\n"
+            "5. No conflicting operations on the same column (e.g., drop_column + cast_numeric).\n"
+            "6. If a column is dropped, remove all other operations on it.\n\n"
+            "If the plan is correct, return it unchanged. If issues exist, return the FIXED plan.\n\n"
+            f"Schema:\n{schema_info}\n\n"
+            f"Plan to review:\n{plan_json}\n\n"
+            "Output the validated/fixed plan as Pydantic JSON."
+        )
 
-    reviewed = llm.invoke([SystemMessage(content="You are a meticulous data pipeline QA reviewer."),
-                           HumanMessage(content=review_prompt)])
-    state["plan"] = reviewed.model_dump()
-    _log(state, "REVIEWER: Plan validated and approved for execution.")
+        reviewed = llm.invoke([SystemMessage(content="You are a meticulous data pipeline QA reviewer."),
+                               HumanMessage(content=review_prompt)])
+        state["plan"] = reviewed.model_dump()
+        _log(state, "REVIEWER: Plan validated and approved for execution.")
+    except Exception as e:
+        _log(state, f"⚠️ REVIEWER WARNING: LLM plan review skipped due to error: {e}. Proceeding with original plan.")
     return state
 
 def python_executor(state: GraphState) -> GraphState:
     """Data processing loop: strictly executing operations mapped by the agent."""
     df = pd.read_csv(state["working_csv_path"])
-    plan = _sort_plan_steps(state["plan"]["steps"])
+    plan = _sort_plan_steps(state["plan"].get("steps", []))
 
     for step in plan:
         col = step["column_name"]
@@ -262,7 +283,7 @@ def python_executor(state: GraphState) -> GraphState:
         # drop_duplicates operates on the full DataFrame, not a column
         if op == "drop_duplicates":
             before = len(df)
-            df = df.drop_duplicates()
+            df = df.drop_duplicates().reset_index(drop=True)
             removed = before - len(df)
             _log(state, f"EXECUTING: drop_duplicates -> Removed {removed} duplicate rows.")
             continue
@@ -279,28 +300,37 @@ def python_executor(state: GraphState) -> GraphState:
 
             elif op == "impute_mean_values":
                 df[col] = pd.to_numeric(df[col], errors='coerce')
-                df[col] = df[col].fillna(df[col].mean())
+                mean_val = df[col].mean()
+                if pd.notna(mean_val):
+                    df[col] = df[col].fillna(mean_val)
+                    _log(state, f"  --> Imputed with mean value: {mean_val:.2f}")
 
             elif op == "impute_median":
                 df[col] = pd.to_numeric(df[col], errors='coerce')
                 col_median = df[col].median()
-                df[col] = df[col].fillna(col_median)
-                _log(state, f"  --> Imputed with median value: {col_median:.2f}")
+                if pd.notna(col_median):
+                    df[col] = df[col].fillna(col_median)
+                    _log(state, f"  --> Imputed with median value: {col_median:.2f}")
 
             elif op == "impute_mode":
                 mode_val = df[col].mode()
-                if not mode_val.empty:
+                if not mode_val.empty and pd.notna(mode_val.iloc[0]):
                     df[col] = df[col].fillna(mode_val.iloc[0])
                     _log(state, f"  --> Imputed with mode value: {mode_val.iloc[0]}")
 
             elif op == "flag_zscore_anomalies":
+                zthresh = state.get("zscore_threshold", ZSCORE_THRESHOLD)
                 numeric_col = pd.to_numeric(df[col], errors='coerce')
                 mean = numeric_col.mean()
                 std = numeric_col.std()
-                if not pd.isna(std) and std != 0:
-                    df[f"{col}_zscore_anomaly"] = np.abs((numeric_col - mean) / std) > ZSCORE_THRESHOLD
-                    outlier_count = int(df[f"{col}_zscore_anomaly"].sum())
-                    _log(state, f"  --> ML Insight: Identified {outlier_count} outliers (threshold: {ZSCORE_THRESHOLD} std).")
+                anom_col = f"{col}_zscore_anomaly"
+                df[anom_col] = False
+                if pd.notna(std) and std > 0:
+                    df[anom_col] = np.abs((numeric_col - mean) / std) > zthresh
+                    outlier_count = int(df[anom_col].sum())
+                    _log(state, f"  --> ML Insight: Identified {outlier_count} outliers (threshold: {zthresh:.1f} std).")
+                else:
+                    _log(state, f"  --> SKIPPED anomaly flag: zero variance or missing standard deviation.")
 
             elif op == "standardize_categorical_text":
                 df[col] = df[col].astype(str).str.upper().str.strip()
@@ -313,11 +343,11 @@ def python_executor(state: GraphState) -> GraphState:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
                 col_min = df[col].min()
                 col_max = df[col].max()
-                if col_max != col_min:
+                if pd.notna(col_min) and pd.notna(col_max) and col_max > col_min:
                     df[col] = (df[col] - col_min) / (col_max - col_min)
                     _log(state, f"  --> Normalized to [0, 1] range (min={col_min:.2f}, max={col_max:.2f}).")
                 else:
-                    _log(state, f"  --> SKIPPED normalization: constant column (all values = {col_min}).")
+                    _log(state, f"  --> SKIPPED normalization: constant or empty column.")
 
             elif op == "drop_column":
                 df = df.drop(columns=[col])
@@ -343,8 +373,9 @@ def qa_validator(state: GraphState) -> GraphState:
     _log(state, "QA-AGENT: Verifying final dataframe topology.")
     df = pd.read_csv(state["working_csv_path"])
 
+    max_retries = state.get("max_retries", MAX_RETRIES)
     remaining_nulls = int(df.isna().sum().sum())
-    if remaining_nulls > 0 and state["retry_count"] < MAX_RETRIES:
+    if remaining_nulls > 0 and state["retry_count"] < max_retries:
         state["retry_count"] += 1
         state["feedback_loop"] = f"Failed validation: Dataset still has {remaining_nulls} nulls. Ensure you use 'impute_mean_values', 'impute_median', or 'impute_mode' to handle NaN values aggressively!"
         _log(state, "QA-REJECTED: Sending failure signals backward through the graph timeline...")

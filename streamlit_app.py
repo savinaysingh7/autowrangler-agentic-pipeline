@@ -23,22 +23,45 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DEFAULT_CSV_PATH = Path("data") / "messy_data.csv"
+ZONING_CSV_PATH = Path("data") / "zoning_compliance_data.csv"
+SENSOR_CSV_PATH = Path("data") / "sensor_telemetry.csv"
 
 # Sidebar Intake
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/9902/9902263.png", width=70)
     st.header("Intelligence Source")
-    ds = st.radio("Data Source", ["Target Demo CSV", "Provide Raw Upload"], label_visibility="collapsed")
+    ds = st.radio("Data Source Preset", [
+        "Target Demo CSV",
+        "Real Estate Zoning Dataset",
+        "IoT Sensor Telemetry",
+        "Provide Raw Upload"
+    ])
+
     target_path = DEFAULT_CSV_PATH
-    if ds == "Provide Raw Upload":
+    default_directive = "I expect this database to have severe hidden monetary outliers."
+
+    if ds == "Real Estate Zoning Dataset":
+        target_path = ZONING_CSV_PATH
+        default_directive = "Inspect real estate lot area square-footage and zoning compliance codes for anomalies."
+    elif ds == "IoT Sensor Telemetry":
+        target_path = SENSOR_CSV_PATH
+        default_directive = "Detect sensor malfunction temperature spikes and missing telemetry pressure readings."
+    elif ds == "Provide Raw Upload":
         uploaded = st.file_uploader("Mount Dataset", type="csv")
         if uploaded:
-            temp = os.path.join(tempfile.gettempdir(), uploaded.name)
+            safe_filename = Path(uploaded.name).name
+            temp = os.path.join(tempfile.gettempdir(), safe_filename)
             with open(temp, "wb") as f:
                 f.write(uploaded.getbuffer())
             target_path = Path(temp)
+        default_directive = "Analyze dataset for structural missing values, formatting glitches, and statistical outliers."
 
-    ctx = st.text_area("Pre-Analysis Briefing (Agent Directives)", "I expect this database to have severe hidden monetary outliers.")
+    ctx = st.text_area("Pre-Analysis Briefing (Agent Directives)", default_directive)
+
+    with st.expander("⚙️ Advanced Pipeline Parameters", expanded=False):
+        zscore_val = st.slider("Z-Score Anomaly Threshold (StdDev)", min_value=1.5, max_value=5.0, value=3.0, step=0.1)
+        max_retries_val = st.slider("Max QA Retry Attempts", min_value=1, max_value=3, value=1, step=1)
+
     run_btn = st.button("🚀 LAUNCH PIPELINE", type="primary", use_container_width=True)
 
 # --- Pipeline Execution with Live Streaming ---
@@ -48,7 +71,9 @@ if run_btn:
         "schema_info": "", "data_sample": "", "domain_context": ctx,
         "plan": {}, "logs": [], "metrics": {}, "executive_narrative": "",
         "analyst_findings": {},
-        "retry_count": 0, "feedback_loop": "", "status": ""
+        "retry_count": 0, "feedback_loop": "", "status": "",
+        "zscore_threshold": float(zscore_val),
+        "max_retries": int(max_retries_val)
     }
     with st.status("Initializing AutoWrangler Pipeline...", expanded=True) as status:
         try:
@@ -255,12 +280,36 @@ if "out" in st.session_state:
 
     # --- Tab 6: Export Payload ---
     with t6:
-        # Summary code block
-        code = "import pandas as pd\nimport numpy as np\n# AutoWrangler v3.0 Synthesized Ruleset\ndef clean():\n"
+        st.markdown("### 💾 Multi-Format Exports")
+        exp_col1, exp_col2, exp_col3 = st.columns(3)
+
+        exp_col1.download_button(
+            "📄 Download Cleaned CSV",
+            clean_df.to_csv(index=False),
+            file_name="sanitized_data.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+        exp_col2.download_button(
+            "📦 Download Cleaned JSON",
+            clean_df.to_json(orient="records", indent=2),
+            file_name="sanitized_data.json",
+            mime="application/json",
+            use_container_width=True
+        )
+
+        exec_report_md = f"# AutoWrangler Executive Report\n\n## Summary Narrative\n{res['executive_narrative']}\n\n## Pipeline Metrics\n- Initial NaNs: {res['metrics'].get('initial_nans')}\n- Final NaNs: {res['metrics'].get('final_nans')}\n- Total Rows: {res['metrics'].get('initial_rows')}\n\n## Plan Operations\n"
         for p in res['plan'].get('steps', []):
-            code += f"    # {p['column_name']}: {p['operation']} -> {p['reason']}\n"
-        st.code(code, language='python')
-        st.download_button("💾 Download Cleaned CSV", clean_df.to_csv(index=False), "sanitized.csv")
+            exec_report_md += f"- **{p['column_name']}**: `{p['operation']}` — {p['reason']}\n"
+
+        exp_col3.download_button(
+            "📝 Download Executive Report (.md)",
+            exec_report_md,
+            file_name="executive_report.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
 
         st.divider()
         st.markdown("### Production Code Generator")
@@ -270,6 +319,7 @@ if "out" in st.session_state:
         script_code += '    print("Executing AutoWrangler Pipeline...")\n'
         script_code += '    df = pd.read_csv(csv_path)\n\n'
 
+        zthresh_export = res.get("zscore_threshold", ZSCORE_THRESHOLD)
         for step in res["plan"].get("steps", []):
             col = step["column_name"]
             op = step["operation"]
@@ -283,13 +333,15 @@ if "out" in st.session_state:
             elif op == "impute_mode":
                 script_code += f"    df['{col}'] = df['{col}'].fillna(df['{col}'].mode().iloc[0])\n"
             elif op == "flag_zscore_anomalies":
-                script_code += f"    df['{col}_zscore_anomaly'] = np.abs((df['{col}'] - df['{col}'].mean()) / df['{col}'].std()) > {ZSCORE_THRESHOLD}\n"
+                script_code += f"    df['{col}_zscore_anomaly'] = np.abs((df['{col}'] - df['{col}'].mean()) / df['{col}'].std()) > {zthresh_export:.1f}\n"
             elif op == "standardize_categorical_text":
                 script_code += f"    df['{col}'] = df['{col}'].astype(str).str.upper().str.strip()\n"
             elif op == "normalize_min_max":
-                script_code += f"    df['{col}'] = (df['{col}'] - df['{col}'].min()) / (df['{col}'].max() - df['{col}'].min())\n"
+                script_code += f"    col_min, col_max = df['{col}'].min(), df['{col}'].max()\n"
+                script_code += f"    if pd.notna(col_min) and pd.notna(col_max) and col_max > col_min:\n"
+                script_code += f"        df['{col}'] = (df['{col}'] - col_min) / (col_max - col_min)\n"
             elif op == "drop_duplicates":
-                script_code += f"    df = df.drop_duplicates()\n"
+                script_code += f"    df = df.drop_duplicates().reset_index(drop=True)\n"
             elif op == "drop_column":
                 script_code += f"    df = df.drop(columns=['{col}'])\n"
             elif op == "parse_dates":

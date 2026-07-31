@@ -287,5 +287,40 @@ class AutoWranglerMLTests(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+    def test_zscore_constant_column(self) -> None:
+        """Constant columns (std=0) should create the anomaly column with False values rather than skipping creation."""
+        dirty = "id,const\n1,10\n2,10\n3,10\n"
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write(dirty)
+            f.flush()
+            tmp_path = f.name
+        try:
+            plan = main.CleaningPlan(steps=[
+                main.ColumnOperation(column_name="const", operation="flag_zscore_anomalies", reason="test"),
+            ])
+            state = {
+                "working_csv_path": tmp_path, "plan": plan.model_dump(),
+                "logs": [], "metrics": {}, "status": "",
+            }
+            result = main.python_executor(state)
+            df = pd.read_csv(result["working_csv_path"])
+            self.assertIn("const_zscore_anomaly", df.columns)
+            self.assertFalse(df["const_zscore_anomaly"].any())
+        finally:
+            os.unlink(tmp_path)
+
+    def test_review_plan_fallback(self) -> None:
+        """review_plan should not crash if LLM provider is unavailable, but gracefully fallback."""
+        state = {
+            "plan": {"steps": [{"column_name": "rev", "operation": "cast_numeric", "reason": "test"}]},
+            "schema_info": "rev: object",
+            "logs": [],
+        }
+        # Calling review_plan without GROQ key should fallback gracefully
+        res = main.review_plan(state)
+        self.assertIn("steps", res["plan"])
+        self.assertTrue(len(res["logs"]) > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

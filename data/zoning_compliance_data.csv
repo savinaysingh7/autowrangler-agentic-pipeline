@@ -1,0 +1,9 @@
+property_id,zone_code,lot_area_sqft,max_height_ft,last_inspection,compliance_status
+P-101,r-1,$5500.00,35.0,2024-01-15,COMPLETED
+P-102,c-2,12000,60.5,14/02/2024,completed
+P-103,NULL,18500,45.0,Jan 10 24,NON_COMPLIANT
+P-104,r-1,$6200.50,ERROR,2024-03-01,PASS
+P-105,m-1,25000,75.0,None,PENDING
+P-106,R-1,999999.0,35.0,2024-03-15,Pass
+P-107,c-1,8400.0,40.0,2024/04/01,UNKNOWN
+P-108,r-2,-,38.0,2024-04-10,non_compliant
