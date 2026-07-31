@@ -170,12 +170,14 @@ if "out" in st.session_state:
             hist_cols = st.columns(min(len(numerics), 3))
             for i, col in enumerate(numerics[:3]):
                 with hist_cols[i % 3]:
-                    fig = px.histogram(clean_df, x=col, nbins=20, title=f"{col}",
-                                       color_discrete_sequence=["#7f00ff"])
-                    fig.update_layout(height=280, margin=dict(t=35, b=20, l=20, r=20),
-                                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                                      font_color='white')
-                    st.plotly_chart(fig, use_container_width=True)
+                    valid_series = clean_df[col].dropna()
+                    if len(valid_series) > 0:
+                        fig = px.histogram(clean_df, x=col, nbins=20, title=f"{col}",
+                                           color_discrete_sequence=["#7f00ff"])
+                        fig.update_layout(height=280, margin=dict(t=35, b=20, l=20, r=20),
+                                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                          font_color='white')
+                        st.plotly_chart(fig, use_container_width=True)
 
             # Correlation Heatmap
             if len(numerics) >= 2:
@@ -209,13 +211,24 @@ if "out" in st.session_state:
     # --- Tab 3: Before / After Comparison ---
     with t3:
         st.markdown("#### Side-by-Side Data Comparison")
+
+        show_diff_only = st.checkbox("🔍 Show Modified / Null Rows Only", value=False)
+        disp_orig = original_df
+        disp_clean = clean_df
+
+        if show_diff_only:
+            # Find rows with any NaNs originally or modified
+            diff_mask = original_df.isna().any(axis=1) | (len(original_df) != len(clean_df))
+            disp_orig = original_df[diff_mask] if len(diff_mask) == len(original_df) else original_df
+            disp_clean = clean_df[diff_mask] if len(diff_mask) == len(clean_df) else clean_df
+
         colL, colR = st.columns(2)
         with colL:
             st.markdown("**🔴 Original (Dirty)**")
-            st.dataframe(original_df, use_container_width=True, hide_index=True)
+            st.dataframe(disp_orig, use_container_width=True, hide_index=True)
         with colR:
             st.markdown("**🟢 Cleaned**")
-            st.dataframe(clean_df, use_container_width=True, hide_index=True)
+            st.dataframe(disp_clean, use_container_width=True, hide_index=True)
 
         # Summary stats
         st.markdown("#### Transformation Summary")
