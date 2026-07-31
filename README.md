@@ -39,18 +39,19 @@ Profiler → Planner (LLM) → Plan Reviewer (LLM) → Executor → QA Validator
 
 ## 🚀 Key Features
 - **LangGraph State Machine**: Cyclical graph with QA feedback loop
-- **Smart Operation Ordering**: Auto-sorts operations (cast → impute → normalize → zscore)
+- **Smart Operation Ordering**: Auto-sorts operations (cast $\to$ impute $\to$ normalize $\to$ zscore)
 - **Plan Review Agent**: LLM validates its own plan before execution
-- **Model Agnostic**: Groq, Mistral, or Ollama (local) via `.env`
+- **Model Agnostic & UI Switcher**: Select between **Groq** (`llama-3.3-70b`), **Mistral** (`mistral-large-latest`), or **Ollama** (`llama3.1`) directly from the UI dropdown
+- **Interactive AI Chat with Data**: Ask natural language questions about your post-pipeline dataset topology
 - **Dynamic Settings & Presets**: Z-Score threshold slider ($1.5\sigma - 5.0\sigma$), max retries slider, and domain dataset presets (E-Commerce, Real Estate Zoning, IoT Telemetry)
 - **Interactive Plotly Dashboards**: Histograms, correlation heatmaps, missing data maps
-- **Before/After Comparison**: Side-by-side dirty vs clean data view
-- **Multi-Format Exports**: Download sanitized data in CSV, JSON, Markdown Executive Report, and standalone Python scripts
+- **Before/After Comparison**: Side-by-side dirty vs clean data view with diff filter
+- **Multi-Format Exports**: Download sanitized data in **CSV**, **JSON**, **SQLite DB (`.db`)**, **Markdown Executive Report**, and standalone Python scripts
 
 ## 💻 Tech Stack
 * **AI Orchestration**: LangGraph, LangChain Core
 * **Language Models**: Groq (Llama-3-70b), Mistral, Ollama (local)
-* **Data Processing**: Pandas, NumPy
+* **Data Processing**: Pandas, NumPy, SQLite3
 * **Visualizations**: Plotly
 * **Constraints/Types**: Pydantic
 * **Frontend**: Streamlit
@@ -61,7 +62,7 @@ Profiler → Planner (LLM) → Plan Reviewer (LLM) → Executor → QA Validator
 autowrangler/
 ├── main.py                    # Core LangGraph pipeline (6 agent nodes, graph compiler)
 ├── app.py                     # CLI entry point
-├── streamlit_app.py           # Interactive Streamlit dashboard (6 tabs, presets, sliders)
+├── streamlit_app.py           # Interactive Streamlit dashboard (7 tabs, model switcher, presets)
 ├── requirements.txt           # Python dependencies
 ├── Dockerfile                 # Container deployment
 ├── .env                       # API keys (GROQ_API_KEY, MISTRAL_API_KEY)
