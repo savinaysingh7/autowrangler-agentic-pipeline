@@ -1,112 +1,118 @@
-# 🧬 AutoWrangler: Agentic Data Science Pipeline
+# AutoWrangler
 
-[![AutoWrangler CI](https://github.com/savinaysingh7/autowrangler-agentic-pipeline/actions/workflows/test.yml/badge.svg)](https://github.com/savinaysingh7/autowrangler-agentic-pipeline/actions/workflows/test.yml)
+AutoWrangler prepares CSV datasets through a constrained multi-step workflow. An optional language model proposes a typed cleaning plan; a deterministic Pandas executor applies the allowlisted operations. The same LangGraph workflow powers the Streamlit app and command-line interface. If no model is configured or available, a conservative local planner and factual local report keep the workflow usable offline.
 
-**AutoWrangler** is a constrained Multi-Agent workflow orchestrator that bridges the gap between Large Language Model reasoning and strictly typed Machine Learning (ML) data-preparation operations.
+## Architecture
 
-Built for my 2026 University Capstone.
-
-## 🎯 Architecture
-
-Standard generative AI tools struggle with data execution because `eval()` causes runtime errors, syntax hallucinations, and security flaws. AutoWrangler constrains LLMs to output rigid **Pydantic JSON schemas** while execution is handled by deterministic Pandas/NumPy functions.
-
-```
-Profiler → Planner (LLM) → Plan Reviewer (LLM) → Executor → QA Validator ⇄ Planner → Data Analyst (LLM)
+```mermaid
+flowchart LR
+    CSV --> Profiler --> Planner --> Reviewer --> Executor --> QA
+    QA -->|retry from original input| Planner
+    QA -->|done or warnings| Analyst --> Exports
 ```
 
-### Agent Nodes
-1. **Profiler**: Samples data distribution, computes memory/NaN statistics
-2. **Planner**: LLM generates a structured cleaning plan (Pydantic-constrained)
-3. **Plan Reviewer**: LLM validates the plan for logical consistency before execution
-4. **Executor**: Deterministically applies 11 data operations via Pandas/NumPy
-5. **QA Validator**: Checks for remaining nulls; loops back to Planner if validation fails
-6. **Data Analyst**: Generates structured executive report with anomaly findings
+See [the architecture guide](docs/CAPSTONE_ARCHITECTURAL_SPEC.md) for data flow, model boundaries, operation behavior and limitations.
 
-### Supported Operations (11)
-| Operation | Description |
-|---|---|
-| `cast_numeric` | Convert currency/string columns to numeric |
-| `standardize_categorical_text` | Uppercase + trim, map NULL-like values to UNKNOWN |
-| `parse_dates` | Convert date strings to datetime |
-| `impute_mean_values` | Fill NaNs with column mean |
-| `impute_median` | Fill NaNs with column median (better for skewed data) |
-| `impute_mode` | Fill NaNs with most frequent value |
-| `flag_zscore_anomalies` | Flag outliers using Z-score (threshold: 3.0 std) |
-| `normalize_min_max` | Scale to [0, 1] range for ML prep |
-| `drop_duplicates` | Remove duplicate rows |
-| `drop_column` | Remove entire column |
-| `leave_alone` | No transformation |
+## Features
 
-## 🚀 Key Features
-- **LangGraph State Machine**: Cyclical graph with QA feedback loop
-- **Smart Operation Ordering**: Auto-sorts operations (cast $\to$ impute $\to$ normalize $\to$ zscore)
-- **Plan Review Agent**: LLM validates its own plan before execution
-- **Model Agnostic & UI Switcher**: Select between **Groq** (`llama-3.3-70b`), **Mistral** (`mistral-large-latest`), or **Ollama** (`llama3.1`) directly from the UI dropdown
-- **Interactive AI Chat with Data**: Ask natural language questions about your post-pipeline dataset topology
-- **Dynamic Settings & Presets**: Z-Score threshold slider ($1.5\sigma - 5.0\sigma$), max retries slider, and domain dataset presets (E-Commerce, Real Estate Zoning, IoT Telemetry)
-- **Interactive Plotly Dashboards**: Histograms, correlation heatmaps, missing data maps
-- **Before/After Comparison**: Side-by-side dirty vs clean data view with diff filter
-- **Multi-Format Exports**: Download sanitized data in **CSV**, **JSON**, **SQLite DB (`.db`)**, **Markdown Executive Report**, and standalone Python scripts
+- Schema-constrained plans validated with Pydantic; no LLM-generated code is executed.
+- LangGraph QA retry loop with the configured retry count. Retries start from the original CSV.
+- Local fallback planning and reporting when a provider is not configured or reachable.
+- Consistent handling of missing values and common placeholders such as `NULL`, `N/A`, `ERROR` and `-`.
+- Identifier-like columns are preserved as text, including leading zeroes; unsafe numeric operations on those fields are skipped.
+- Groq, Mistral and Ollama integrations.
+- Interactive data profiles, anomaly views, missing-value maps and before/after comparison.
+- CSV, JSON, SQLite, Markdown, standalone Python and Jupyter Notebook exports.
+- Reproducibility passport with input/output/plan SHA-256 digests and runtime metrics.
+- Offline synthetic benchmark for anomaly precision, recall, F1 and missing-value reduction.
 
-## 💻 Tech Stack
-* **AI Orchestration**: LangGraph, LangChain Core
-* **Language Models**: Groq (Llama-3-70b), Mistral, Ollama (local)
-* **Data Processing**: Pandas, NumPy, SQLite3
-* **Visualizations**: Plotly
-* **Constraints/Types**: Pydantic
-* **Frontend**: Streamlit
-* **Persistence**: SQLite (LangGraph checkpointing)
+## Quick start
 
-## 📁 Project Structure
-```
-autowrangler/
-├── main.py                    # Core LangGraph pipeline (6 agent nodes, graph compiler)
-├── app.py                     # CLI entry point
-├── streamlit_app.py           # Interactive Streamlit dashboard (7 tabs, model switcher, presets)
-├── requirements.txt           # Python dependencies
-├── Dockerfile                 # Container deployment
-├── .env                       # API keys (GROQ_API_KEY, MISTRAL_API_KEY)
-├── data/
-│   ├── messy_data.csv             # Demo E-Commerce dataset
-│   ├── zoning_compliance_data.csv # Real Estate Zoning dataset
-│   └── sensor_telemetry.csv       # IoT Sensor Telemetry dataset
-├── memory/                    # SQLite checkpoints
-├── reports/                   # Generated reports
-├── tests/
-│   └── test_autowrangler.py   # Pytest test suite (21 unit tests)
-└── .github/workflows/
-    └── test.yml               # CI/CD pipeline
-```
+Use Python 3.12 or 3.13.
 
-## 🏁 Run It Locally
-```bash
-pip install -r requirements.txt
-# Populate your GROQ_API_KEY inside the .env
-
-# Streamlit UI
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
 streamlit run streamlit_app.py
-
-# CLI mode
-python app.py                    # Uses demo dataset
-python app.py path/to/data.csv   # Custom dataset
 ```
 
-### Using Ollama (Local Models)
-```bash
-# Install Ollama: https://ollama.ai
-ollama pull llama3.1
-# Set in .env:
-# AUTOWRANGLER_LLM_PROVIDER=ollama
-# OLLAMA_MODEL=llama3.1
+The dashboard starts with a demo dataset and also includes zoning, sensor telemetry and CSV upload presets.
+
+### Language models
+
+Copy `.env.example` to `.env`, then set one or more keys there (the local `.env` is ignored by Git):
+
+```dotenv
+GROQ_API_KEY=your_key
+# MISTRAL_API_KEY=your_key
+# AUTOWRANGLER_LLM_PROVIDER=groq
 ```
 
-### Docker
-```bash
-docker build -t autowrangler .
-docker run -p 8501:8501 --env-file .env autowrangler
+Choose a provider in the dashboard. For Ollama, install and start Ollama separately, pull a model, then set:
+
+```dotenv
+AUTOWRANGLER_LLM_PROVIDER=ollama
+OLLAMA_MODEL=llama3.1
 ```
 
-## 🧪 Run Tests
-```bash
+If no model is available, planning/reporting fall back to local deterministic behavior. The planner receives schema and aggregate profile metadata, not raw rows.
+
+## Command line
+
+```powershell
+# Use the bundled demo and print a summary
+python app.py
+
+# Clean a CSV and save the cleaned output
+python app.py path\to\dataset.csv --output cleaned.csv
+
+# Select a provider, anomaly threshold and QA retry limit
+python app.py path\to\dataset.csv --provider ollama --zscore-threshold 2.8 --max-retries 2
+```
+
+Arguments:
+
+- `--output`: optional persistent path for the cleaned CSV.
+- `--provider`: `groq`, `mistral` or `ollama`.
+- `--zscore-threshold` (or `--zscore`): number greater than 0 and at most 10; default 3.0.
+- `--max-retries`: 0–5; default 1.
+
+## Reports and evaluation
+
+Generate a Markdown run passport:
+
+```powershell
+python reports/generate_passport.py data/messy_data.csv --output reports/reproducibility_passport.md
+```
+
+Run the deterministic, offline benchmark:
+
+```powershell
+python reports/evaluation_benchmark.py
+```
+
+The benchmark uses fixed seeds and labeled synthetic outliers; its measurements describe that synthetic case and do not predict performance on arbitrary datasets.
+
+## Tests
+
+```powershell
 python -m pytest tests/ -v
 ```
+
+The test suite mocks model calls and does not need API keys or a running Ollama service.
+
+## Docker
+
+```powershell
+docker build -t autowrangler .
+docker run --rm -p 8501:8501 --env-file .env autowrangler
+```
+
+The image runs Streamlit as an unprivileged user. The health check uses Python's standard library, so it does not depend on `curl`.
+
+## Dataset and privacy notes
+
+Uploaded data is written to a uniquely named OS temporary file for the current Streamlit session and cleaned up when replaced or when the server process exits. The pipeline keeps a working CSV temporarily so the dashboard can preview and export the result. No raw rows are sent to the model. User-supplied domain context and chat questions may be sent to the selected provider; chat uses aggregate metrics only.
+
+Review transformations, unresolved missing values, and anomaly flags before using output in production. Date parsing can be ambiguous across locales, and Z-score flags are review signals rather than proof of errors.
